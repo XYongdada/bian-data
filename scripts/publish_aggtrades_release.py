@@ -26,6 +26,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_GH = REPO_ROOT / ".tools/bin/gh.exe"
 
 
+def gh_executable() -> str:
+    executable = shutil.which("gh") or (str(LOCAL_GH) if LOCAL_GH.exists() else None)
+    if executable is None:
+        raise RuntimeError("GitHub CLI 'gh' is required; install it and run 'gh auth login'")
+    return executable
+
+
 @dataclass(frozen=True)
 class Cursor:
     archive: int
@@ -49,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-asset-mib", type=int, default=95)
     parser.add_argument("--xz-preset", type=int, default=6, choices=range(0, 10))
     parser.add_argument("--retries", type=int, default=8)
+    parser.add_argument(
+        "--proxy",
+        help="HTTP/SOCKS proxy used only by this process, e.g. http://127.0.0.1:7890",
+    )
     parser.add_argument("--compress-only", action="store_true")
     parser.add_argument("--keep-local", action="store_true")
     parser.add_argument("--max-shards", type=int, help="Stop cleanly after this many base chunks.")
@@ -218,17 +229,17 @@ def sha256(path: Path) -> str:
 
 
 def run_gh(arguments: list[str], retries: int, capture: bool = False) -> str:
-    executable = shutil.which("gh") or (str(LOCAL_GH) if LOCAL_GH.exists() else None)
-    if executable is None:
-        raise RuntimeError("GitHub CLI 'gh' is required; install it and run 'gh auth login'")
+    executable = gh_executable()
     for attempt in range(1, retries + 1):
         result = subprocess.run(
             [executable, *arguments], text=True, capture_output=True, encoding="utf-8"
         )
         if result.returncode == 0:
             return result.stdout if capture else ""
+        error = (result.stderr.strip() or result.stdout.strip() or "unknown GitHub error")
+        print(f"GitHub error (attempt {attempt}/{retries}): {error}", flush=True)
         if attempt == retries:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+            raise RuntimeError(error)
         delay = min(120, 5 * 2 ** (attempt - 1))
         print(f"GitHub operation failed; retry {attempt + 1}/{retries} in {delay}s", flush=True)
         time.sleep(delay)
@@ -236,22 +247,33 @@ def run_gh(arguments: list[str], retries: int, capture: bool = False) -> str:
 
 
 def ensure_release(repo: str, tag: str, retries: int) -> None:
-    executable = shutil.which("gh") or (str(LOCAL_GH) if LOCAL_GH.exists() else None)
-    if executable is None:
-        raise RuntimeError("GitHub CLI 'gh' is required")
-    result = subprocess.run(
-        [executable, "release", "view", tag, "--repo", repo], capture_output=True
-    )
-    if result.returncode != 0:
-        run_gh(
-            ["release", "create", tag, "--repo", repo, "--title", tag, "--notes", "BTCUSDT aggTrades time-sharded tar.xz archives."],
-            retries,
+    executable = gh_executable()
+    endpoint = f"repos/{repo}/releases/tags/{tag}"
+    for attempt in range(1, retries + 1):
+        result = subprocess.run(
+            [executable, "api", endpoint, "--silent"],
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
         )
+        if result.returncode == 0:
+            return
+        error = result.stderr.strip() or result.stdout.strip()
+        if "HTTP 404" in error:
+            run_gh(
+                ["release", "create", tag, "--repo", repo, "--title", tag, "--notes", "BTCUSDT aggTrades time-sharded tar.xz archives."],
+                retries,
+            )
+            return
+        print(f"GitHub release lookup error (attempt {attempt}/{retries}): {error}", flush=True)
+        if attempt == retries:
+            raise RuntimeError(error)
+        time.sleep(min(120, 5 * 2 ** (attempt - 1)))
 
 
 def remote_assets(repo: str, tag: str, retries: int) -> dict[str, int]:
     payload = run_gh(
-        ["release", "view", tag, "--repo", repo, "--json", "assets"], retries, capture=True
+        ["api", f"repos/{repo}/releases/tags/{tag}"], retries, capture=True
     )
     return {item["name"]: int(item["size"]) for item in json.loads(payload)["assets"]}
 
@@ -274,6 +296,11 @@ def main() -> int:
     args = parse_args()
     if args.raw_chunk_mib <= 0 or args.max_asset_mib <= 0 or args.retries <= 0:
         raise SystemExit("chunk sizes and retries must be positive")
+    if args.proxy:
+        os.environ["HTTP_PROXY"] = args.proxy
+        os.environ["HTTPS_PROXY"] = args.proxy
+        os.environ["ALL_PROXY"] = args.proxy
+        print("proxy enabled for GitHub operations", flush=True)
     archives = archive_paths(args.source)
     if not archives:
         raise SystemExit(f"no BTCUSDT aggTrades archives under {args.source}")

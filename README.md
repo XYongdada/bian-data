@@ -16,6 +16,12 @@ same command resumes from the last completed chunk.
 python scripts/publish_aggtrades_release.py
 ```
 
+If direct GitHub API access is unstable, pass the local proxy explicitly:
+
+```powershell
+python scripts/publish_aggtrades_release.py --proxy http://127.0.0.1:7890
+```
+
 Use `--max-shards 1 --compress-only --keep-local` for a one-shard local test.
 Authenticate once before uploading with `gh auth login`; a portable GitHub CLI
 may also be placed at `.tools/bin/gh.exe`.

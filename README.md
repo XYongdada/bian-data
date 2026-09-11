@@ -16,3 +16,13 @@ Historical public market datasets used by the `lianghua` research project.
 
 Each ZIP is kept in the original Binance archive format and filename. More
 datasets may be added separately in the future.
+
+## Browser-readable CSV
+
+The same metrics are also available as uncompressed, yearly CSV files under
+`csv/futures/um/daily/metrics/BTCUSDT/`. These files can be opened directly on
+GitHub without downloading or extracting the source archives.
+
+Run `python scripts/convert_metrics_to_csv.py` to rebuild them from the ZIP
+archives. Rows are deduplicated by `create_time` and retain Binance's original
+column names and values.

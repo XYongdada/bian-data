@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repo", default="XYongdada/bian-data")
     parser.add_argument("--state-dir", type=Path, default=repo / ".publish-state")
-    parser.add_argument("--raw-chunk-mib", type=int, default=256)
+    parser.add_argument("--raw-chunk-mib", type=int, default=700)
     parser.add_argument("--max-asset-mib", type=int, default=95)
     parser.add_argument("--xz-preset", type=int, default=6, choices=range(0, 10))
     parser.add_argument("--retries", type=int, default=8)
@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--compress-only", action="store_true")
     parser.add_argument("--keep-local", action="store_true")
+    parser.add_argument(
+        "--destination",
+        choices=("git", "release"),
+        default="git",
+        help="Publish regular repository files by default; release is optional.",
+    )
     parser.add_argument("--max-shards", type=int, help="Stop cleanly after this many base chunks.")
     return parser.parse_args()
 
@@ -297,6 +303,73 @@ def upload_asset(path: Path, repo: str, tag: str, retries: int) -> None:
     print(f"uploaded and verified: {path.name}", flush=True)
 
 
+def run_git(arguments: list[str], retries: int = 1, capture: bool = False) -> str:
+    for attempt in range(1, retries + 1):
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() if capture else ""
+        error = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
+        print(f"Git error (attempt {attempt}/{retries}): {error}", flush=True)
+        if attempt == retries:
+            raise RuntimeError(error)
+        time.sleep(min(120, 5 * 2 ** (attempt - 1)))
+    raise AssertionError("unreachable")
+
+
+def configure_sparse_checkout() -> None:
+    run_git(["sparse-checkout", "init", "--no-cone"])
+    result = subprocess.run(
+        ["git", "sparse-checkout", "set", "--no-cone", "--stdin"],
+        cwd=REPO_ROOT,
+        input="/*\n!/archives/\n",
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+
+
+def publish_git_asset(path: Path, first_ms: int, retries: int) -> str:
+    year = datetime.fromtimestamp(first_ms / 1000, UTC).year
+    relative = Path("archives") / "futures" / "um" / "aggTrades" / "BTCUSDT" / str(year) / path.name
+    destination = REPO_ROOT / relative
+    configure_sparse_checkout()
+
+    tracked = subprocess.run(
+        ["git", "cat-file", "-e", f"HEAD:{relative.as_posix()}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    ).returncode == 0
+    if not tracked:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        print(
+            f"committing: {relative.as_posix()} ({path.stat().st_size / 1024 / 1024:.2f} MiB)",
+            flush=True,
+        )
+        run_git(["add", "--sparse", "--", relative.as_posix()])
+        run_git(["commit", "-m", f"Add aggTrades shard {path.name}"])
+    else:
+        print(f"already committed: {relative.as_posix()}", flush=True)
+
+    local_head = run_git(["rev-parse", "HEAD"], capture=True)
+    run_git(["push", "origin", "main"], retries=retries)
+    remote_line = run_git(["ls-remote", "origin", "refs/heads/main"], retries=retries, capture=True)
+    remote_head = remote_line.split()[0] if remote_line else ""
+    if remote_head != local_head:
+        raise RuntimeError(f"remote HEAD verification failed: local={local_head} remote={remote_head}")
+    run_git(["sparse-checkout", "reapply"])
+    print(f"pushed and verified: {relative.as_posix()}", flush=True)
+    return relative.as_posix()
+
+
 def main() -> int:
     args = parse_args()
     if args.raw_chunk_mib <= 0 or args.max_asset_mib <= 0 or args.retries <= 0:
@@ -331,10 +404,13 @@ def main() -> int:
             if not asset_path.exists() or sha256(asset_path) != record["sha256"]:
                 raise RuntimeError(f"pending asset is missing or corrupt: {asset_path}")
             first = int(record["start_ms"])
-            tag = f"aggtrades-{datetime.fromtimestamp(first / 1000, UTC).year}"
-            upload_asset(asset_path, args.repo, tag, args.retries)
+            if args.destination == "git":
+                published_to = publish_git_asset(asset_path, first, args.retries)
+            else:
+                published_to = f"aggtrades-{datetime.fromtimestamp(first / 1000, UTC).year}"
+                upload_asset(asset_path, args.repo, published_to, args.retries)
             record["status"] = "verified"
-            record["release"] = tag
+            record["published_to"] = published_to
             save_state(state_path, state)
             if not args.keep_local:
                 asset_path.unlink()
@@ -365,10 +441,13 @@ def main() -> int:
             assets[asset_path.name] = record
             save_state(state_path, state)
             if not args.compress_only:
-                tag = f"aggtrades-{datetime.fromtimestamp(first / 1000, UTC).year}"
-                upload_asset(asset_path, args.repo, tag, args.retries)
+                if args.destination == "git":
+                    published_to = publish_git_asset(asset_path, first, args.retries)
+                else:
+                    published_to = f"aggtrades-{datetime.fromtimestamp(first / 1000, UTC).year}"
+                    upload_asset(asset_path, args.repo, published_to, args.retries)
                 record["status"] = "verified"
-                record["release"] = tag
+                record["published_to"] = published_to
                 save_state(state_path, state)
                 if not args.keep_local:
                     asset_path.unlink()

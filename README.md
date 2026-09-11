@@ -7,9 +7,10 @@ No datasets are currently published.
 ## Publishing BTCUSDT aggTrades
 
 `scripts/publish_aggtrades_release.py` streams the local Binance ZIP archives,
-creates time-named `.tar.xz` shards smaller than 95 MiB, uploads each shard to
-yearly GitHub Releases, verifies the remote size, and deletes successful local
-temporary files. Progress is saved under `.publish-state/`, so rerunning the
+creates time-named `.tar.xz` shards smaller than 95 MiB, commits each shard as
+a regular file under `archives/futures/um/aggTrades/BTCUSDT/<year>/`, pushes and
+verifies `origin/main`, then removes the successful local working-tree copy by
+sparse checkout. Progress is saved under `.publish-state/`, so rerunning the
 same command resumes from the last completed chunk.
 
 ```powershell

@@ -286,10 +286,15 @@ def upload_asset(path: Path, repo: str, tag: str, retries: int) -> None:
             raise RuntimeError(f"remote asset name collision with different size: {path.name}")
         print(f"already uploaded: {path.name}", flush=True)
         return
+    print(
+        f"uploading: {path.name} ({path.stat().st_size / 1024 / 1024:.2f} MiB) -> {tag}",
+        flush=True,
+    )
     run_gh(["release", "upload", tag, str(path), "--repo", repo], retries)
     verified = remote_assets(repo, tag, retries)
     if verified.get(path.name) != path.stat().st_size:
         raise RuntimeError(f"remote size verification failed: {path.name}")
+    print(f"uploaded and verified: {path.name}", flush=True)
 
 
 def main() -> int:
